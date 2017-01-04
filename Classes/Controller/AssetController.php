@@ -109,44 +109,52 @@ class AssetController extends ActionController
             return htmlspecialchars(json_encode($uploadedFile), ENT_NOQUOTES);
         }
 
-        // Get the target folder.
-        if ($this->getMediaModule()->hasFolderTree()) {
-            $targetFolder = $this->getMediaModule()->getFolderForCombinedIdentifier($combinedIdentifier);
+        // Check for duplicates
+        $storage = ResourceFactory::getInstance()->getStorageObjectFromCombinedIdentifier($combinedIdentifier);
+        $duplicates = $this->findSysFileDuplicatesBySha1AndStorage($uploadedFile, $storage);
+        
+        // @todo some rules and process for duplicates here
+        if (empty($duplicates)) {
+            // Get the target folder.
+            if ($this->getMediaModule()->hasFolderTree()) {
+                $targetFolder = $this->getMediaModule()->getFolderForCombinedIdentifier($combinedIdentifier);
+            } else {
+                $targetFolder = $this->getMediaModule()->getTargetFolderForUploadedFile($uploadedFile, $storage);
+            }
+
+            try {
+                $conflictMode = DuplicationBehavior::cast(DuplicationBehavior::RENAME);
+                $fileName = $uploadedFile->getName();
+                $file = $targetFolder->addFile($uploadedFile->getFileWithAbsolutePath(), $fileName, $conflictMode);
+
+                // Run the indexer for extracting metadata.
+                $this->getMediaIndexer($file->getStorage())
+                    ->extractMetadata($file)
+                    ->applyDefaultCategories($file);
+
+                $response = array(
+                    'success' => true,
+                    'uid' => $file->getUid(),
+                    'name' => $file->getName(),
+                    'thumbnail' => $this->getThumbnailService($file)->create(),
+                );
+            } catch (UploadException $e) {
+                $response = array('error' => 'The upload has failed, no uploaded file found!');
+            } catch (InsufficientUserPermissionsException $e) {
+                $response = array('error' => 'You are not allowed to upload files!');
+            } catch (UploadSizeException $e) {
+                $response = array('error' => vsprintf('The uploaded file "%s" exceeds the size-limit', array($uploadedFile->getName())));
+            } catch (InsufficientFolderWritePermissionsException $e) {
+                $response = array('error' => vsprintf('Destination path "%s" was not within your mount points!', array($targetFolder->getIdentifier())));
+            } catch (IllegalFileExtensionException $e) {
+                $response = array('error' => vsprintf('Extension of file name "%s" is not allowed in "%s"!', array($uploadedFile->getName(), $targetFolder->getIdentifier())));
+            } catch (ExistingTargetFileNameException $e) {
+                $response = array('error' => vsprintf('No unique filename available in "%s"!', array($targetFolder->getIdentifier())));
+            } catch (\RuntimeException $e) {
+                $response = array('error' => vsprintf('Uploaded file could not be moved! Write-permission problem in "%s"?', array($targetFolder->getIdentifier())));
+            }
         } else {
-            $storage = ResourceFactory::getInstance()->getStorageObjectFromCombinedIdentifier($combinedIdentifier);
-            $targetFolder = $this->getMediaModule()->getTargetFolderForUploadedFile($uploadedFile, $storage);
-        }
-
-        try {
-            $conflictMode = DuplicationBehavior::cast(DuplicationBehavior::RENAME);
-            $fileName = $uploadedFile->getName();
-            $file = $targetFolder->addFile($uploadedFile->getFileWithAbsolutePath(), $fileName, $conflictMode);
-
-            // Run the indexer for extracting metadata.
-            $this->getMediaIndexer($file->getStorage())
-                ->extractMetadata($file)
-                ->applyDefaultCategories($file);
-
-            $response = array(
-                'success' => true,
-                'uid' => $file->getUid(),
-                'name' => $file->getName(),
-                'thumbnail' => $this->getThumbnailService($file)->create(),
-            );
-        } catch (UploadException $e) {
-            $response = array('error' => 'The upload has failed, no uploaded file found!');
-        } catch (InsufficientUserPermissionsException $e) {
-            $response = array('error' => 'You are not allowed to upload files!');
-        } catch (UploadSizeException $e) {
-            $response = array('error' => vsprintf('The uploaded file "%s" exceeds the size-limit', array($uploadedFile->getName())));
-        } catch (InsufficientFolderWritePermissionsException $e) {
-            $response = array('error' => vsprintf('Destination path "%s" was not within your mount points!', array($targetFolder->getIdentifier())));
-        } catch (IllegalFileExtensionException $e) {
-            $response = array('error' => vsprintf('Extension of file name "%s" is not allowed in "%s"!', array($uploadedFile->getName(), $targetFolder->getIdentifier())));
-        } catch (ExistingTargetFileNameException $e) {
-            $response = array('error' => vsprintf('No unique filename available in "%s"!', array($targetFolder->getIdentifier())));
-        } catch (\RuntimeException $e) {
-            $response = array('error' => vsprintf('Uploaded file could not be moved! Write-permission problem in "%s"?', array($targetFolder->getIdentifier())));
+            $response = array('error' => 'Duplications of uploaded file already exists in system!');
         }
 
         // to pass data through iframe you will need to encode all html tags
@@ -352,4 +360,24 @@ class AssetController extends ActionController
         return GeneralUtility::makeInstance(MediaModule::class);
     }
 
+    /**
+     * Find sys_file duplicates by sha1 and storage
+     * 
+     * @param \Fab\Media\FileUpload\MultipartedFile $file
+     * @param \TYPO3\CMS\Core\Resource\ResourceStorage $storage
+     * @return array $duplicates
+     */
+    protected function findSysFileDuplicatesBySha1AndStorage(\Fab\Media\FileUpload\MultipartedFile $file, \TYPO3\CMS\Core\Resource\ResourceStorage $storage)
+    {
+        $duplicates = [];
+        $fileAbsolutePath = $file->getUploadFolder() . '/' . $file->getName();
+        $sha1 = sha1_file($fileAbsolutePath);
+        $where = 'storage = ' . $storage->getUid() . ' AND sha1 = \'' . $sha1 . '\'';
+        $res = $GLOBALS['TYPO3_DB']->exec_SELECTquery('*', 'sys_file', $where);
+        while ($row = $GLOBALS['TYPO3_DB']->sql_fetch_assoc($res)) {
+            $duplicates[] = $row;
+        }
+        $GLOBALS['TYPO3_DB']->sql_free_result($res);
+        return $duplicates;
+    }
 }
