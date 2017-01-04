@@ -118,7 +118,7 @@ class AssetController extends ActionController
         }
 
         try {
-            $conflictMode = DuplicationBehavior::RENAME;
+            $conflictMode = DuplicationBehavior::cast(DuplicationBehavior::RENAME);
             $fileName = $uploadedFile->getName();
             $file = $targetFolder->addFile($uploadedFile->getFileWithAbsolutePath(), $fileName, $conflictMode);
 
